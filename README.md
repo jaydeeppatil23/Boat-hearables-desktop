@@ -1,6 +1,6 @@
 # boAt Airdopes Windows Desktop Hub
 
-A modern, minimalist desktop controller and reverse-engineered Bluetooth protocol implementation for **boAt Airdopes Plus 222** (and compatible **Bluetrum AB32**-based TWS earbuds).
+A modern, minimalist desktop controller and reverse-engineered Bluetooth protocol implementation for **supported boAt audio gear** (and compatible **Bluetrum AB32**-based TWS earbuds).
 
 ---
 
