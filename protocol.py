@@ -2,6 +2,8 @@
 Bluetrum BLE Protocol Definitions & Packet Helpers for boAt Earbuds.
 """
 
+import time
+
 # BLE Service & Characteristic UUIDs
 BLUETRUM_SERVICE_UUID = "0000fdb3-0000-1000-8000-00805f9b34fb"
 WRITE_CHAR_UUID       = "0000ff17-0000-1000-8000-00805f9b34fb"
@@ -13,6 +15,7 @@ CMD_KEY           = 0x22  # Touch Gesture Mapping
 CMD_AUTO_SHUTDOWN = 0x23  # Sleep / Idle Timer
 CMD_WORK_MODE     = 0x25  # BEAST / Low Latency Mode
 CMD_DEVICE_INFO   = 0x27  # Device Info & Telemetry Query
+CMD_NOTIFY        = 0x28  # Bundled unsolicited telemetry (TLV)
 CMD_FIND_DEVICE   = 0x2A  # Hardware Locator Buzzer
 CMD_NAME          = 0x2D  # NVRAM Device Renaming
 CMD_SPATIAL_AUDIO = 0x32  # Spatial Audio / 3D Sound
@@ -65,3 +68,75 @@ def make_packet(seq: int, cmd: int, cmd_type: int, payload: bytes) -> bytes:
     """
     s = seq & 0x0F
     return bytes([s, cmd, cmd_type, 0x00, len(payload)]) + payload
+
+
+def parse_tlvs(payload: bytes) -> list[tuple[int, bytes]]:
+    """Reject incomplete TLVs instead of displaying a partial value as valid."""
+    values = []
+    offset = 0
+    while offset < len(payload):
+        if offset + 2 > len(payload):
+            raise ValueError("Incomplete telemetry header")
+        tag, length = payload[offset:offset + 2]
+        end = offset + 2 + length
+        if end > len(payload):
+            raise ValueError("Incomplete telemetry value")
+        values.append((tag, bytes(payload[offset + 2:end])))
+        offset = end
+    return values
+
+
+class PacketDecoder:
+    """Decode complete GATT frames and ordered Bluetrum protocol fragments.
+
+    Each fragment has its own sequence number, as in the bundled SDK research.
+    A GATT notification may contain several complete frames. Incomplete frames
+    are rejected; only explicitly framed protocol fragments are retained.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._fragment = None
+        self._updated_at = 0.0
+
+    def feed(self, data: bytes) -> list[tuple[int, int, bytes]]:
+        frames = []
+        offset = 0
+        try:
+            while offset < len(data):
+                if offset + 5 > len(data):
+                    raise ValueError("Incomplete packet header")
+                seq, cmd, kind, fragment, length = data[offset:offset + 5]
+                end = offset + 5 + length
+                if end > len(data):
+                    raise ValueError("Packet length does not match its payload")
+                frames.append((seq & 0x0F, cmd, kind, fragment, bytes(data[offset + 5:end])))
+                offset = end
+
+            messages = []
+            for seq, cmd, kind, fragment, payload in frames:
+                index, total = fragment & 0x0F, (fragment >> 4) + 1
+                if kind not in (2, 3) or index >= total:
+                    raise ValueError("Invalid response or fragment header")
+                if time.monotonic() - self._updated_at > 5:
+                    self.reset()
+                if index == 0:
+                    self._fragment = (cmd, kind, total, 0, seq, b"")
+                if self._fragment is None:
+                    raise ValueError("Missing first packet fragment")
+                old_cmd, old_kind, old_total, expected_index, expected_seq, joined = self._fragment
+                if (cmd, kind, total, index, seq) != (old_cmd, old_kind, old_total, expected_index, expected_seq):
+                    raise ValueError("Packet fragments arrived out of order")
+                joined += payload
+                if index == total - 1:
+                    messages.append((cmd, kind, joined))
+                    self.reset()
+                else:
+                    self._fragment = (cmd, kind, total, index + 1, (seq + 1) & 0x0F, joined)
+                    self._updated_at = time.monotonic()
+            return messages
+        except ValueError:
+            self.reset()
+            raise

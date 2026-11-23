@@ -29,13 +29,15 @@ This project solves this through **clean-room protocol reverse engineering** of 
 ## ✨ Features
 
 * 🔋 **Real-Time Battery Telemetry:** Individual percentage levels and live charging indicators (`⚡`) for **Left Earbud**, **Right Earbud**, and the **Charging Case**.
-* 🚀 **BEAST™ Mode Toggle:** Instant one-click switch between Standard Mode and **55ms Ultra-Low Latency Gaming Mode**.
+* 🚀 **BEAST™ Mode Toggle:** Switch between standard and gaming modes, with device-confirmed state. Latency depends on the earbud model.
 * 🌐 **3D Spatial Audio:** Toggle hardware DSP spatial expansion for wider, more immersive soundstages.
 * 🎚️ **DSP Sound Profiles:** Switch between tuned hardware equalizer curves (*Signature, Bass Boost, Balanced, Pop, Rock, Vocal*) applied directly into the earbud's DSP.
-* 🔔 **Acoustic Earbud Locator:** Plays a targeted 2.0–3.2 kHz frequency chirp panned to **Left Only**, **Right Only**, or **Both Buds** with instantaneous stop control.
+* 🔔 **Acoustic Earbud Locator:** Plays a quieter 2.0–3.2 kHz chirp on an explicitly selected Windows stereo output, panned to **Left**, **Right**, or **Both Buds**. Includes stop control and a 30-second limit.
 * ✋ **Touch Gesture Remapper:** Reconfigure single tap, double tap, triple tap, and long press gestures to custom actions (*Play/Pause, Track Skip, Volume, Gaming Mode, Assistant*).
 * ⏱️ **Auto-Shutdown Sleep Timer:** Configure custom idle auto power-off thresholds (5m, 10m, 30m, or disabled).
-* 🛠️ **Live Protocol Sniffer:** Collapsible real-time inspector monitoring outgoing (`TX`) and incoming (`RX`) Bluetooth ATT packets.
+* 🛠️ **Connection Diagnostics:** Timestamped, bounded Bluetooth logs with copy and clear controls.
+* 🖥️ **Desktop Controls:** Compact device panel, a single battery row, mode switches, and separate dialogs for discovery, finder, and settings. Supports keyboard controls and scrolling in smaller windows.
+* 🔄 **Connection Recovery:** Live discovery, remembered device selection, bounded retries, optional reconnection after a dropped connection, and clean shutdown.
 
 ---
 
@@ -48,7 +50,7 @@ The communication protocol was reverse-engineered by dissecting the Bluetrum Tec
   * **Service UUID:** `0000fdb3-0000-1000-8000-00805f9b34fb`
   * **Write Characteristic (TX):** `0000ff17-0000-1000-8000-00805f9b34fb` (Write Without Response)
   * **Notify Characteristic (RX):** `0000ff18-0000-1000-8000-00805f9b34fb` (Notify / Read)
-* **Secondary Serial Channel:** Bluetooth Classic RFCOMM / SPP (Port 1, UUID `00001101-...`)
+* **Research only:** Bluetooth Classic RFCOMM / SPP (Port 1, UUID `00001101-...`). The desktop app currently implements the BLE control channel; it does not provide an SPP fallback.
 
 ### 2. Packet Framing Format
 All commands follow a 5-byte header followed by a variable-length TLV payload:
@@ -61,6 +63,8 @@ All commands follow a 5-byte header followed by a variable-length TLV payload:
 | `3` | **Fragmentation** | `((Total - 1) << 4) \| (Index & 0x0F)` (`0x00` for single packet) |
 | `4` | **Payload Length** | Byte count of subsequent payload ($N$) |
 | `5 .. 5+N` | **Payload (TLV)** | Parameter Type, Length, and Value |
+
+The decoder handles multiple frames per notification and ordered fragments with a sequence number for each frame. Device-info replies (`0x27`) and bundled notifications (`0x28`) contain TLVs; direct notifications use the info ID as the command. Setting replies acknowledge acceptance (`0x00` = success) and are not on/off state values. Mode changes are followed by a state query.
 
 ### 3. Decoded Command Map
 
@@ -81,6 +85,8 @@ The device responds with 3 consecutive bytes representing `[Left, Right, Case]`:
 * **Bits 0–6 (`byte & 0x7F`):** Remaining battery percentage (`0`–`100%`).
 * **Bit 7 (`byte & 0x80`):** Charging state flag (`1` = Charging, `0` = Discharging).
 
+Some devices omit battery components. Missing fields and values outside `0`–`100` are displayed as unavailable rather than as a valid percentage.
+
 ---
 
 ## 🎧 Supported Devices
@@ -88,11 +94,13 @@ The device responds with 3 consecutive bytes representing `[Left, Right, Case]`:
 Tested and confirmed on:
 * **boAt Airdopes Plus 222**
 
-Also architecturally compatible with other Bluetrum-based models sharing the same protocol stack:
+Other models may work when they expose the same Bluetrum control characteristics and protocol. These models still require individual hardware verification:
 * boAt Airdopes Plus 221 / 223 / 224
 * boAt Airdopes Plus Neo / Wave / Aura
 * boAt Airdopes Plus Spark ANC / 421 ANC / 422 ANC / 423 ANC
 * boAt Rockerz 351 ANC
+
+Discovery uses case-insensitive names, service advertisements, and the Bluetrum manufacturer ID. These are **possible-match hints**, not proof of support. On connection, the app validates the control write and notification characteristics and selects the supported GATT write mode. Classic-only earbuds and devices using another vendor protocol cannot use these controls. Battery fields and sound features also vary by model; missing data is shown as unavailable.
 
 ---
 
@@ -101,9 +109,13 @@ Also architecturally compatible with other Bluetrum-based models sharing the sam
 ```
 boat hearables desktop/
 ├── main.py                   # Application entry point
-├── boat_controller_app.py     # Modern minimalist UI & async Bleak worker
-├── protocol.py               # Protocol packet encoders, opcodes & constants
-├── audio_ringer.py           # Stereo-panned locating audio synthesizer
+├── boat_controller_app.py    # Device controls, dialogs & user actions
+├── ble_worker.py             # Async discovery, GATT validation & recovery
+├── ui_components.py          # Shared theme, battery readouts & mode switches
+├── assets/                   # Small SVG control indicators
+├── protocol.py               # Packet framing, fragment decoding & telemetry helpers
+├── audio_ringer.py           # Output-selected stereo locator with cancellation
+├── tests/                    # Focused protocol, connection, audio & UI regressions
 ├── run_boat_controller.bat   # Windows one-click launcher
 ├── requirements.txt          # Python dependencies
 ├── LICENSE                   # GNU GPLv3 License
@@ -139,9 +151,30 @@ boat hearables desktop/
      ```
 
 4. **Connect:**
-   * Click **Scan**.
-   * Select your earbuds (highlighted with `★`).
-   * Click **Connect** and manage your audio gear!
+   * Turn on Windows Bluetooth and pair your earbuds in Windows Settings for music and calls.
+   * Open the case or take your earbuds out. The app scans automatically in the **Bluetooth devices** dialog; use **Scan again** to refresh.
+   * Select your earbuds. **Possible match** identifies a discovery hint; support is checked when connecting.
+   * Enable **Show other Bluetooth LE devices** if your earbuds advertise with another name.
+   * Click **Connect**. The chooser closes when connected and opens the device controls. Use **Devices** to return to the chooser or disconnect.
+   * Choose an equalizer profile and click **Apply**. The idle power-off timer is under **Settings**. Mode switches wait for a state update; unconfirmed changes are reported rather than shown as successful.
+
+### Connection and finder tips
+
+* Audio and device controls use separate connections. A BLE control connection does not select or route Windows audio.
+* If connecting fails, keep the earbuds awake and nearby, close the phone companion app, and scan again. **Settings** contains **Connection help** for setup guidance and **Diagnostics** for the underlying error.
+* **Reconnect after connection loss**, under **Settings**, is enabled by default and can be turned off. Retries are bounded and can be cancelled; the app does not automatically connect at startup.
+* Open **Find earbuds** and select the **stereo output belonging to your earbuds**. Remove the earbuds before playing. Left/right targeting requires stereo audio and may not work in hands-free or mono modes. The finder can work independently of the BLE control connection. Closing the finder stops its sound.
+* Press **Ctrl+R** to scan when available and **Esc** to stop the locator sound.
+
+### Focused validation
+
+Run the hardware-independent regression checks:
+
+```powershell
+python -B -m unittest discover -s tests -v
+```
+
+These checks simulate Bluetooth devices and audio streams and include offscreen UI checks. They do not establish compatibility with untested physical models.
 
 ---
 

@@ -183,6 +183,8 @@ cython_debug/
 
 # Reverse Engineering Dumps & Proprietary Binaries
 research/
+temp/
+tests/
 *.apk
 *.xapk
 *.dex
